@@ -1,0 +1,84 @@
+name: Build Discord AppImage
+
+on:
+  schedule:
+    - cron: "0 16 * * *" # Daily at 16:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Get latest Discord version by following redirects and parsing final URL
+      - name: Get Discord version
+        id: get_version
+        run: |
+          final_url=$(curl -s -L -w "%{url_effective}" -o /dev/null "https://discord.com/api/download?platform=linux")
+          version=$(echo "$final_url" | grep -oP '(?<=linux/)[0-9]+\.[0-9]+\.[0-9]+')
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      # Ensure last_version.txt file exists
+      - name: Prepare last_version.txt
+        run: |
+          if [ ! -f last_version.txt ]; then
+            echo "" > last_version.txt
+          fi
+
+      # Load stored previous version
+      - name: Check stored version
+        id: check_version
+        run: |
+          old_version=$(cat last_version.txt)
+          echo "old_version=$old_version" >> $GITHUB_OUTPUT
+
+      # Decide whether to build or skip
+      - name: Decide to build
+        id: decide_build
+        run: |
+          if [ "${{ steps.get_version.outputs.version }}" != "${{ steps.check_version.outputs.old_version }}" ]; then
+            echo "build=true" >> $GITHUB_OUTPUT
+          else
+            echo "build=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Optional log for skipped build
+      - name: Log skipped build
+        if: steps.decide_build.outputs.build == 'false'
+        run: echo "No new Discord version, skipped build."
+
+      # Build AppImage only if new version detected
+      - name: Build AppImage
+        if: steps.decide_build.outputs.build == 'true'
+        run: |
+          sudo apt update && sudo apt install desktop-file-utils
+          chmod a+x build-discord-appimage.sh
+          ./build-discord-appimage.sh
+
+      # Upload release artifacts if built
+      - name: Upload and release AppImage
+        if: steps.decide_build.outputs.build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ steps.get_version.outputs.version }}
+          tag_name: ${{ steps.get_version.outputs.version }}
+          prerelease: false
+          files: |
+            ./*.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Save new version and commit if built
+      - name: Save new version
+        if: steps.decide_build.outputs.build == 'true'
+        run: |
+          echo "${{ steps.get_version.outputs.version }}" > last_version.txt
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_version.txt
+          git commit -m "chore: update last built Discord version to ${{ steps.get_version.outputs.version }}" || echo "No changes to commit"
+          git push
